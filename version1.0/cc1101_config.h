@@ -102,6 +102,7 @@
 #define SFTX     0x3B         // Flush the TX FIFO buffer.
 #define SWORRST  0x3C         // Reset real time clock.
 #define SNOP     0x3D         // No operation.
+#define TXRXFIFO 0x3F         // Tx and Rx FIFOs
 
 // status regs
 #define PARTNUM        0xF0   // Part number

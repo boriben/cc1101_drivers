@@ -4,6 +4,7 @@
 // Reset (removes color & formatting)
 #define RESET       "\x1b[0m"
 
+// Standard Colors
 #define BLACK       "\x1b[30m"
 #define RED         "\x1b[31m"
 #define GREEN       "\x1b[32m"
@@ -13,6 +14,7 @@
 #define CYAN        "\x1b[36m"
 #define WHITE       "\x1b[37m"
 
+// Bright Colors
 #define BRIGHT_BLACK   "\x1b[90m"
 #define BRIGHT_RED     "\x1b[91m"
 #define BRIGHT_GREEN   "\x1b[92m"
@@ -22,7 +24,7 @@
 #define BRIGHT_CYAN    "\x1b[96m"
 #define BRIGHT_WHITE   "\x1b[97m"
 
-//Background Colors
+// Background Colors
 #define BG_BLACK       "\x1b[40m"
 #define BG_RED         "\x1b[41m"
 #define BG_GREEN       "\x1b[42m"

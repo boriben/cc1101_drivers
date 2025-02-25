@@ -1,35 +1,28 @@
-#include <unistd.h>  // for usleep()
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <vector>
+#include <cmath>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL2_gfxPrimitives.h>
-#include <vector>
-#include <algorithm> // std::max, std::min
-#include <cmath>
-#include <wiringPi.h>       // pinMode(), digitalWrite(), digitalRead(), wiringPiSetup(), ...
-#include <wiringPiSPI.h>    // wiringPiSPISetup(), wiringPiSPIDataRW(), ... 
+
+#include <wiringPi.h>
+#include <wiringPiSPI.h>
+
 #include "cc1101_config.h"
 #include "ansi_colors.h"
-
-#define RESET   "\x1b[0m"  // Resets color to default
-#define RED     "\x1b[31m"
-#define GREEN   "\x1b[32m"
-#define YELLOW  "\x1b[33m"
-#define BLUE    "\x1b[34m"
 
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 400
 
 #define SPECTRUM_HEIGHT 200
-
 #define WATERFALL_HEIGHT 200
 #define WATERFALL_ROWS 100
 
-#define NUM_CHANNELS 50     // num x values on spectrum (resolution)
+#define NUM_CHANNELS 30    // num x values on spectrum (resolution)
 
 std::vector<int16_t> rssi_values(NUM_CHANNELS, -100);
 std::vector<std::vector<int16_t>> waterfall(WATERFALL_ROWS, std::vector<int16_t>(NUM_CHANNELS, -100));
@@ -38,11 +31,8 @@ SDL_Window* window = nullptr;
 SDL_Renderer* renderer = nullptr;
 TTF_Font* font = nullptr;
 
-void spi_write_strobe(uint8_t spi_instr) {
-    uint8_t tbuf[1] = {0};
-    tbuf[0] = spi_instr;
-    //printf("SPI_data: 0x%02X\n", tbuf[0]);
-    wiringPiSPIDataRW(0, tbuf, 1) ;
+void spi_write_strobe(uint8_t commandRegister) {
+    wiringPiSPIDataRW(0, &commandRegister, 1) ;
 }
 
 void spi_write_register(uint8_t spi_instr, uint8_t value) {
@@ -53,15 +43,12 @@ void spi_write_register(uint8_t spi_instr, uint8_t value) {
     return;
 }
 
-void spi_write_burst(uint8_t spi_instr, const uint8_t *pArr, uint8_t len) {
-     uint8_t tbuf[len + 1];
-     tbuf[0] = spi_instr | WRITE_BURST;
-     for (uint8_t i=0; i<len ;i++ )
-     {
-          tbuf[i+1] = pArr[i];
-          //printf("SPI_arr_write: 0x%02X\n", tbuf[i+1]);
-     }
-     wiringPiSPIDataRW(0, tbuf, len + 1);
+void spi_write_burst(uint8_t startReg, const uint8_t *data, uint8_t len) {
+    uint8_t buff[len + 1];
+    buff[0] = startReg | WRITE_BURST;
+    for (uint8_t i = 0; i < len ;i++) { buff[i+1] = data[i]; }
+    // memcpy(buff + 1, data, len);
+    wiringPiSPIDataRW(0, buff, len + 1);
 }
 
 uint8_t spi_read_register(uint8_t regi) {
@@ -202,7 +189,7 @@ MOD_FORMAT in 3 bits from MDMCFG2[6:4]
 */
 void set_modulation_type(uint8_t mod_type) {
     uint8_t mdmcfg2 = spi_read_register(MDMCFG2);
-    mdmcfg2 = mdmcfg2 | (mod_type << 4);
+    mdmcfg2 = (mdmcfg2 & 0x8F) | (mod_type << 4);   // zero the mod_type bits then set them
     spi_write_register(MDMCFG2, mdmcfg2);
 }
 
@@ -218,40 +205,7 @@ const char* get_modulation_type() {
     }
 }
 
-void set_freq(uint8_t ism_freq) {
-    uint8_t freq2, freq1, freq0;
-    switch (ism_freq) {
-        case 0x01: // 315 Mhz
-            freq2=0x0C;
-            freq1=0x1D;
-            freq0=0x89;
-            // spi_write_burst(PATABLE_BURST, patable_power_315, 8); // only needed for TX
-            break;
-        case 0x02: // 433 MHz
-                freq2=0x10;
-                freq1=0xB0;
-                freq0=0x71;
-                // spi_write_burst(PATABLE_BURST, patable_power_433, 8);
-                break;
-        case 0x03: // 868 MHz
-                freq2=0x21;
-                freq1=0x65;
-                freq0=0x6A;
-                // spi_write_burst(PATABLE_BURST, patable_power_868, 8);
-                break;
-        case 0x04: // 915MHz
-                freq2=0x23;
-                freq1=0x31;
-                freq0=0x3B;
-                // spi_write_burst(PATABLE_BURST, patable_power_915, 8);
-                break;
-    }
-    spi_write_register(FREQ2,freq2);
-    spi_write_register(FREQ1,freq1);
-    spi_write_register(FREQ0,freq0);
-}
-
-void set_specific_freq(double hz) {
+void set_frequency(double hz) {
     uint32_t freq_word = (uint32_t)((hz * 65536) / CRYSTAL_FREQUENCY);
 
     // 24 bit freq word split into 3 registers
@@ -272,15 +226,6 @@ uint32_t get_frequency() {
     return freq * 396.7285156;  // Convert to Hz
 }
 
-// returns MDMCFG4 (contains DRATE_E[3:0]) as first byte and MDMCFG3 (contains DRATE_M[7:0]) as second byte packed together
-uint16_t get_dataRateRegs() {
-    uint8_t mdmcfg4 = spi_read_register(MDMCFG4); // mdmcfg4 contains DRATE_E[3:0]
-    uint8_t mdmcfg3 = spi_read_register(MDMCFG3); // mdmcfg3 contains DRATE_M[7:0]
-    printf("MDMCFG4: 0x%02X, MDMCFG3: 0x%02X\n", mdmcfg4, mdmcfg3);
-
-    // pack two bytes into one uint16
-    return (mdmcfg4 << 8) | mdmcfg3;
-}
 
 // cannot go below 24.80 kbps? turn off manchester encoding, reduce RX filter bandwidth?
 void set_dataRate(double kbps) {
@@ -303,12 +248,10 @@ void set_dataRate(double kbps) {
         DRATE_M = 0;
     }
 
-    uint8_t mdmcfg4_old = spi_read_register(MDMCFG4);
-    uint8_t mdmcfg4_new = (mdmcfg4_old & 0xF0) | (DRATE_E & 0x0F);
-    spi_write_register(MDMCFG4, mdmcfg4_new);
+    uint8_t mdmcfg4 = spi_read_register(MDMCFG4);
+    mdmcfg4 = (mdmcfg4 & 0xF0) | DRATE_E;
+    spi_write_register(MDMCFG4, mdmcfg4);
     spi_write_register(MDMCFG3, DRATE_M);
-
-    printf("Set Data Rate: %.2f kbps -> DRATE_E = %d, DRATE_M = 0x%02X\n", kbps, DRATE_E, DRATE_M);
 }
 
 double get_dataRate() {
@@ -316,13 +259,57 @@ double get_dataRate() {
     uint8_t mdmcfg3 = spi_read_register(MDMCFG3);  // Read MDMCFG3 (DRATE_M)
 
     uint8_t DRATE_E = mdmcfg4 & 0x0F;  // Extract lower 4 bits
-    uint8_t DRATE_M = mdmcfg3;         // Mantissa is full 8 bits
+    uint8_t DRATE_M = mdmcfg3;         // Mantissa is full byte
 
     double dataRate = ((256 + DRATE_M) * pow(2, DRATE_E) * 26000000.0) / pow(2, 28);
-
-    printf("Current Data Rate: %.2f kbps (DRATE_E = %d, DRATE_M = 0x%02X)\n", dataRate, DRATE_E, DRATE_M);
     
     return dataRate;
+}
+
+// calculate channel spacing (Hz) from CHANSPC_M and CHANSPC_E
+double get_channel_spacing() {
+    uint8_t chanspc_regs[2];
+    spi_read_burst(MDMCFG1, chanspc_regs, 2);
+    
+    uint8_t mdmcfg1 = chanspc_regs[0];                  // MDMCFG1 contains CHANSPC_E[1:0] (lowest 2 bits)
+    uint8_t chanspc_e = mdmcfg1 & 0x03;                 // mask with 00000011 (0x03) to get lowest 2
+    uint8_t chanspc_m = chanspc_regs[1];                // MDMCFG0 contains CHANSPC_M[7:0] (the whole byte)
+
+    return (26000000 / (1 << 18) * (256 + chanspc_m) * (1 << chanspc_e)); // see datasheet formula (pg. 78)
+}
+
+// E: 0-3   M: 0-255
+// E, M = 0 -> minimum chanspc of ~25 kHz
+// E, M = 3, 255 -> maximum chanscp of ~405 kHz
+void set_channel_spacing(uint8_t chanspc_e, uint8_t chanspc_m) {
+    // MDMCFG1 contains CHANSPC_E[1:0] (lowest 2 bits)
+    // MDMCFG0 contains CHANSPC_M[7:0] (the whole byte)
+
+    uint8_t mdmfcg1 = spi_read_register(MDMCFG1);
+
+    mdmfcg1 = (mdmfcg1 & 0xFC) | chanspc_e;
+
+    spi_write_register(MDMCFG1, mdmfcg1);
+    spi_write_register(MDMCFG0, chanspc_m);
+}
+
+double get_channelBW() {
+    uint8_t mdmcfg4 = spi_read_register(MDMCFG4);
+    
+    // CHANBW_E from [7:6] and CHANBW_M from [5:4]
+    uint8_t chanbw_e = (mdmcfg4 >> 6) & 0x03;
+    uint8_t chanbw_m = (mdmcfg4 >> 4) & 0x03;
+
+    return CRYSTAL_FREQUENCY / (8 * (4 + chanbw_m) * (1 << chanbw_e));
+}
+
+// 0 -> ~812 kHz channel filter BW (max)
+// 3 -> ~58 kHz (min)
+void set_channelBW(uint8_t bw) {
+    uint8_t mdmcfg4 = spi_read_register(MDMCFG4);
+
+    mdmcfg4 = (mdmcfg4 & 0x0F) | (bw << 6) | (bw << 4);   // set the four chanbw bits to zero then set both chanbw_e and chanbw_m to the same 2 bit value
+    spi_write_register(MDMCFG4, mdmcfg4);
 }
 
 
@@ -485,7 +472,7 @@ void drawAxes(double total_bandwidth) {
 
 int main() {
 
-    // SETUP
+    // setup
     setupSPI();
     setupSDL(&window, &renderer, &font);
 
@@ -494,61 +481,39 @@ int main() {
     const char* mod_type = get_modulation_type();
 
     // FREQUENCY
-    set_specific_freq(314900000); // 314.9 Mhz
-    double freq = get_frequency(); // Hz
-
-    // rssi_values.reserve(10000000);
-    // waterfall.reserve(10000);
-    
-    // MANCHESTER ENCODING
-    uint8_t mdmcfg2 = spi_read_register(MDMCFG2);
-    if (mdmcfg2 & 0x08) {
-        printf("Manchester Encoding is ENABLED\n");
-    }
+    set_frequency(314000000);
+    double freq = get_frequency();
+    printf("Freq: %.1f Mhz\n", freq/1e6);
 
     // CHANNEL SPACING
-    // spi_write_register(MDMCFG0, 0x00);                  // MINIMUM CHANNEL SPACING FOR HIGH RES (SETS CHANSPC_M TO 0)
-    uint8_t chanspc_m = spi_read_register(MDMCFG0);     // contains CHANSPC_M[7:0] (the whole byte)
+    // set_channel_spacing(1, 40);
+    // double channel_spacing = get_channel_spacing();
 
-    uint8_t mdmcfg1 = spi_read_register(MDMCFG1);       // contains CHANSPC_E[1:0]
-    mdmcfg1 = mdmcfg1 & 0xFC;                           // MINIMUM CHANNEL SPACING (SETS CHANSPC_E TO 0)
-    // spi_write_register(MDMCFG1, mdmcfg1);
-
-    uint8_t chanspc_e = mdmcfg1 & 0x03;                 // only keep lowest two bits (1:0)
-
-    double channel_spacing = 26000000 / (1 << 18) * (256 + chanspc_m) * (1 << chanspc_e); // see datasheet formula (pg. 78)
-    double total_bandwidth = channel_spacing * NUM_CHANNELS;
-
+    // TOTAL BANDWIDTH
+    // double total_bandwidth = channel_spacing * NUM_CHANNELS;
     
-    // // GET DATA RATE
-    // uint16_t drateRegs = get_dataRateRegs();
-    // uint8_t drate_e = ((drateRegs >> 8) & 0x0F); printf("DRATE_E: 0x%02X = %u\n", drate_e, drate_e);
-    // uint8_t drate_m = drateRegs & 0xFF; printf("DRATE_M: 0x%02X = %u\n", drate_m, drate_m);
+    // CHANNEL BANDWIDTH
+    // set_channelBW(3);
+    // double chanBW = get_channelBW();
     
-    // get_dataRate();
-    
-    // CHANNEL BANDWIDTH (SET TO MINIMUM TO ALLOW LOWER kbps?)
-    // uint8_t mdmcfg4 = (drateRegs >> 8);
-    // mdmcfg4 = (mdmcfg4 & 0x0F) | 0x00; // Set CHANBW_E = 0, CHANBW_M = 0 (Smallest BW)
-    // spi_write_register(MDMCFG4, mdmcfg4);
-    
-    // // SET DATA RATE
-    // set_dataRate(10);
-    
-    // get_dataRate();
-    // drateRegs = get_dataRateRegs();
-    // drate_e = ((drateRegs >> 8) & 0xFF) & 0x0F; printf("DRATE_E: 0x%02X = %u\n", drate_e, drate_e);
-    // drate_m = drateRegs & 0xFF; printf("DRATE_M: 0x%02X = %u\n", drate_m, drate_m);
+    // DATA RATE
+    // set_dataRate(100);
+    // double data_rate = get_dataRate();
 
-    print_MDMCFGs();
+    // PACKET CONTROL?
+    // spi_write_register(PKTCTRL0, 0x32);
 
 
-    char currText[128];
-    sprintf(currText, "Mod: %s    Freq: %.1f MHz", mod_type, freq / 1e6);
-    printf("Mode: %s, Freq: %.0fHz, ChSpc: %.0fHz, TotalBand: %.0f\n", mod_type, freq, channel_spacing, total_bandwidth);
+    // print_MDMCFGs();
+    
+    // printf("Mode: %s, Freq: %.1f MHz, ChSpc: %.1f kHz, TotalBand: %.1f MHz, DataRate: %.1f kbps, ChanBW: %.1f kHz\n", mod_type, freq / 1e6, channel_spacing / 1e3, total_bandwidth / 1e6, data_rate, chanBW / 1e3);
 
     receive(); // DO NEED
-    usleep(800);
+
+    // SCREEN TEXT
+    char currText[128];
+    sprintf(currText, "Mod: %s    Freq: %.1f MHz", mod_type, freq / 1e6);
+
     bool running = true;
     SDL_Event event;
     while (running) {
@@ -556,29 +521,33 @@ int main() {
             if (event.type == SDL_QUIT) { running = false; }
         }
 
-        // scan channels within current freq
+
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-            sidle();                // or spi_write_strobe(SIDLE);
-            
-            spi_write_register(CHANNR, ch);
+            double new_freq = 314000000 + ch * 10000;
+            set_frequency(new_freq);
+            uint8_t marcstate;
+            // do {
+            //     marcstate = spi_read_register(MARCSTATE) & 0x1F;
+            // } while (marcstate != 0x0D);  // 0x0D = RX Mode
+            int maxTries = 1000;
+            do {
+                marcstate = spi_read_register(MARCSTATE) & 0x1F;
+                maxTries--;
+                delayMicroseconds(100); 
+            } while (marcstate != 0x0D && maxTries > 0);
 
-            spi_write_strobe(SRX);  //writes receive strobe (receive mode)
-            usleep(300);
+            if (marcstate != 0x0D) {
+                printf("ERROR: Never reached RX state. Current MARCSTATE=0x%02X\n", marcstate);
+            }
 
-            // uint8_t marcstate = 0xFF;                     //set unknown/dummy state value
-            // while (marcstate != 0x0D) {          //0x0D = RX 
-            //     marcstate = (spi_read_register(MARCSTATE) & 0x1F); //read out state of cc1100 to be sure in RX
-            //     printf("marcstate_rx: 0x%02X\r\n", marcstate); // see page 93/98 of datasheet
-            // }
-            
-            // get RSSI for current channel
+        
             uint8_t rssi_hex = spi_read_register(RSSI);
-            uint8_t offset =  RSSI_OFFSET_315MHZ; // e.g., RSSI_OFFSET_315MHZ aka 64 aka 0x40
-            int16_t rssi_dbm = rssi_convert(rssi_hex, offset);
-            
-            // printf("RSSI: %d dBm, Mode: %s, Freq: %.0fHz, Ch #: %u, ChSpc: %.0fHz\n", rssi_dbm, mod_type, freq, ch, channel_spacing);
+            int16_t rssi_dbm = rssi_convert(rssi_hex, RSSI_OFFSET_315MHZ);
+        
+            // printf("Freq: %.1f MHz, RSSI: %d dBm\n", new_freq / 1e6, rssi_dbm);
             rssi_values[ch] = rssi_dbm;
         }
+        
         
         // move rows forward/down
         for (int i = WATERFALL_ROWS - 1; i > 0; i--) { waterfall[i] = waterfall[i - 1]; }
@@ -587,12 +556,12 @@ int main() {
         
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        drawSpectrum(renderer, rssi_values, channel_spacing);
+        drawSpectrum(renderer, rssi_values, 10000);
         drawWaterfall(renderer, waterfall);
+        drawAxes((NUM_CHANNELS-1)*10000);
         drawText(currText, 200, 10);
-        drawAxes(total_bandwidth/1e6);
         SDL_RenderPresent(renderer);
-        SDL_Delay(50); // 20 FPS
+        SDL_Delay(30);
     }
      
     TTF_CloseFont(font);
@@ -604,3 +573,4 @@ int main() {
 
 
 // g++ cc1101_drivers.cpp cc1101_config.cpp -o cc1101_driver -I/usr/include/SDL2 -lwiringPi -lSDL2 -lSDL2_ttf -lSDL2_gfx
+// git add . && git commit -m "Your commit message" && git push origin main
